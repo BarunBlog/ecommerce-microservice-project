@@ -23,6 +23,7 @@ build/
 # Virtual environments
 .venv/
 venv/
+myvenv/
 env/
 ENV/
 .python-version
