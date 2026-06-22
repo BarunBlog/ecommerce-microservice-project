@@ -1,0 +1,68 @@
+# docker-compose.yml — category-service stack
+#
+# Brings up:
+#   - category-db      : PostgreSQL 16 (named volume for data)
+#   - category-service : Django + DRF + gunicorn, built from ./Dockerfile
+#
+# Usage:
+#   cp .env.example .env        # then edit secrets
+#   docker compose up --build   # build + start
+#   docker compose logs -f category-service
+#
+# Smoke test once it's up:
+#   curl http://localhost:8000/healthz
+#   curl http://localhost:8000/api/categories/
+
+services:
+  category-db:
+    image: postgres:16
+    container_name: category-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-category_db}
+      POSTGRES_USER: ${POSTGRES_USER:-category_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - category_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-category_user} -d ${POSTGRES_DB:-category_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - category-net
+
+  category-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: category-service
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override the .env POSTGRES_HOST so the container reaches the
+      # compose service by its service name instead of the host.
+      POSTGRES_HOST: category-db
+      POSTGRES_PORT: 5432
+    depends_on:
+      category-db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    networks:
+      - category-net
+
+volumes:
+  category_db_data:
+    name: category_db_data
+
+networks:
+  category-net:
+    name: category-net
+    driver: bridge

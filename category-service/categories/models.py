@@ -35,6 +35,6 @@ class Category(models.Model):
         return self.name
 
     def save(self, *args, **kwargs):
-        if not self.slug:
+        if self.name:
             self.slug = slugify(self.name)[:120]
         super().save(*args, **kwargs)

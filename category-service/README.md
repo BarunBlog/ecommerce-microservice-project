@@ -1,24 +1,48 @@
 # category-service
 
-Pure CRUD Django + DRF service for product categories.
+Django + DRF microservice that manages the `Category` catalog. Exposes
+a full CRUD JSON API to other services in the ecommerce platform.
 
 ## Scope
-- Manages `Category` records in its own PostgreSQL database.
-- No RabbitMQ events in this step. Events will be added when a real
-  consumer (e.g. notification-service) needs them.
+- Owns `Category` records in its own PostgreSQL database.
+- Full CRUD via the HTTP API below (no Django admin).
+- No RabbitMQ events. Other services that need category data call this
+  API directly.
 
 ## Endpoints
 All under `/api/categories/`:
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET    | `/`            | List categories. `?all=true` to include inactive. |
-| GET    | `/active/`     | List only active categories. |
-| POST   | `/`            | Create a category. |
-| GET    | `/{id}/`       | Retrieve a category. |
-| PUT/PATCH | `/{id}/`    | Update a category. |
-| DELETE | `/{id}/`       | Soft-delete (`is_active=False`). `?hard=true` to actually delete. |
-| GET    | `/healthz`     | Health check (no auth). |
+| Method   | Path        | Purpose |
+|----------|-------------|---------|
+| GET      | `/`         | List categories, active only by default. |
+| POST     | `/`         | Create a category. |
+| GET      | `/{id}/`    | Retrieve a category by UUID. |
+| PUT      | `/{id}/`    | Full update of a category. |
+| PATCH    | `/{id}/`    | Partial update of a category. |
+| DELETE   | `/{id}/`    | Soft-delete (`is_active=False`) by default. `?hard=true` to actually delete the row. |
+| GET      | `/healthz`  | Health check (no auth). |
+
+### Query parameters
+
+`GET /api/categories/` accepts:
+
+| Param   | Default | Meaning |
+|---------|---------|---------|
+| `all`   | `false` | `?all=true` includes inactive categories in the list. |
+| `page`  | `1`     | Page number for paginated results. |
+
+### Request body (POST / PUT / PATCH)
+
+```json
+{
+  "name": "Electronics",
+  "description": "Phones, laptops, accessories",
+  "is_active": true
+}
+```
+
+`slug` is auto-generated from `name` and is not accepted from the
+client. `id`, `created_at`, and `updated_at` are read-only.
 
 ## Local run (without Docker)
 ```bash

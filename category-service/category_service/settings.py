@@ -70,6 +70,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
+    # django.contrib.auth is intentionally NOT in INSTALLED_APPS, so DRF's
+    # default AnonymousUser / Token fallbacks would crash every request.
+    # Setting these to None tells DRF to skip the lazy import entirely.
+    "UNAUTHENTICATED_USER": None,
+    "UNAUTHENTICATED_TOKEN": None,
 }
 
 # --- Default PK --------------------------------------------------------------

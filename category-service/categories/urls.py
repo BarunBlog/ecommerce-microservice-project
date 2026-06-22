@@ -1,8 +1,8 @@
 from django.urls import path
 
-from .views import CategoryDetailView, CategoryListView
+from .views import CategoryDetailView, CategoryListCreateView
 
 urlpatterns = [
-    path("", CategoryListView.as_view(), name="category-list"),
+    path("", CategoryListCreateView.as_view(), name="category-list"),
     path("<uuid:id>/", CategoryDetailView.as_view(), name="category-detail"),
 ]

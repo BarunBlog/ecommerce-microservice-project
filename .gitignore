@@ -59,3 +59,7 @@ coverage.xml
 .ruff_cache/
 .dmypy.json
 dmypy.json
+
+# --- Postman (per-user local workspace scratch) ---
+/postman/
+/.postman/
