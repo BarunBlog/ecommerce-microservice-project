@@ -16,7 +16,7 @@ microservices that together power a small ecommerce platform.
 | Service              | Status         | Purpose                                |
 |----------------------|----------------|----------------------------------------|
 | `category-service`   | **Implemented**| CRUD for the `Category` catalog.       |
-| `product-service`    | Placeholder dir| (not started)                          |
+| `product-service`    | **Implemented (NestJS)** | CRUD for the `Product` catalog + prices. Embeds category from `category-service` over HTTP. Publishes `products.event.created` to the `ecommerce.events` topic exchange. |
 | `cart-service`       | Placeholder dir| (not started)                          |
 | `order-service`      | Placeholder dir| (not started)                          |
 | `inventory-service`  | Placeholder dir| (not started)                          |
@@ -284,10 +284,11 @@ When you add a new service, copy this file and rename:
 2. **JSON in, JSON out.** No HTML, no templates, no admin. The
    `INSTALLED_APPS` list is the documentation of this rule.
 3. **No synchronous cross-service calls from request paths in the
-   future.** When `product-service` exists, getting product details
-   will either call `category-service` over HTTP at composition time
-   (gateway) or via cached event data. Direct DB access between
-   services is forbidden.
+   future.** The first cross-service call is the product→category embed
+   in `product-service`. It is HTTP, 3s timeout, and on failure the
+   product is still returned with `category: null` (logged warning).
+   Direct DB access between services remains forbidden. Long-term the
+   embed will move to gateway composition or cached event data.
 4. **Soft-delete as the default.** Hard delete is explicit, audited in
    the request (`?hard=true`), and rare.
 5. **Server-generated slugs.** Clients don't pass them. This avoids
@@ -444,14 +445,69 @@ substitute the equivalent in your framework.
     `.puku/`, `.vscode/`, `postman/`, `.postman/`. The root
     `.gitignore` already covers these.
 
+### 7.1 NestJS service notes (e.g. `product-service`)
+
+When you scaffold a service in TypeScript + NestJS (matching the
+`product-service` shape), use this checklist on top of §7:
+
+1. **Multi-stage Dockerfile.** `builder` stage runs `npm install` +
+   `npx prisma generate` + `npm run build`. `runtime` stage installs
+   only production deps, copies `dist/`, `prisma/`, the generated
+   `@prisma/client`, and `entrypoint.sh`. Run as a non-root user via
+   `dumb-init` so `docker stop` reaps the node process cleanly.
+2. **Prisma migrations on boot.** `entrypoint.sh` waits for Postgres
+   (parse `DATABASE_URL` with Node to get host/port — no extra deps),
+   then runs `npx prisma migrate deploy`. Falls back to
+   `prisma db push --skip-generate` only if `prisma/migrations/` is
+   empty, so first-boot works without committed SQL.
+3. **`npm install` clears the "Cannot find module" lint noise.**
+   Until dependencies are installed in the container, every Nest
+   import will flag as unresolvable in the editor. This is expected —
+   it's a resolution issue, not a code issue.
+4. **`@nestjs/mapped-types` is not bundled with `@nestjs/common`.**
+   Required for `PartialType` in update DTOs. Add it explicitly to
+   `dependencies`.
+5. **Global `ValidationPipe`.** Mount with
+   `whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: true }`.
+   The `forbidNonWhitelisted` flag mirrors the "clients never set
+   server fields" rule — sending `slug` or `id` returns 400.
+6. **UUID primary keys.** In Prisma:
+   `id String @id @default(uuid())`. Cross-service references are
+   `String` columns (no FK).
+7. **Slugs.** Server-side via `slugify(name, { lower: true, strict: true, trim: true })`,
+   sliced to 120 chars. Regenerated on every `save()` (the Nest way:
+   in `update()`, not in a `save` override).
+8. **Trailing slashes.** Nest does not 301-redirect like Django, so the
+   §6.2 trap does not bite. Still keep the convention (`@Controller('products')` + `products/:id/`-style routes) for platform uniformity.
+9. **Cross-service HTTP.** Use `@nestjs/axios` registered globally in
+   `AppModule`. 3-second timeout. On any error (timeout, non-2xx,
+   network), embed `category: null` and log a warning — never throw
+   out of `findOne()`.
+10. **RabbitMQ producer.** Use `ClientsModule.register` with
+    `transport: Transport.RMQ`, `exchange: 'ecommerce.events'`,
+    `exchangeType: 'topic'`, `exchangeOptions: { durable: true }`,
+    `persistent: true`. Connect lazily in `onModuleInit()` so missing
+    brokers don't crash boot. Failed emits log a warning but never
+    roll back the API write.
+11. **Docker networking.** The service's `docker-compose.yml` joins an
+    external network named `<upstream>-net` (e.g. `category-net`) so
+    the hostname `category-service` resolves across stacks.
+12. **Trailing slash on Nest routes.** NestJS does not auto-redirect,
+    so `/api/products/<uuid>` (no slash) returns 404, not a redirect.
+    All clients — including Postman collections — must use trailing
+    slashes. Document this in the service's README.
+
 ---
 
 ## 8. Out of scope (for now)
 
-- **RabbitMQ events.** Mentioned in model docstrings and view
-  docstrings as a future task (`categories/signals.py` will publish
-  `category.created/updated/deleted`). Don't add the broker or
-  signal wiring yet — it belongs to a later milestone.
+- **RabbitMQ events.** `product-service` already publishes
+  `products.event.created` to the `ecommerce.events` topic exchange.
+  `category-service` does **not** publish yet — `categories/signals.py`
+  wiring is still a future task. Other services (cart, order,
+  inventory, payment, notification, user) are not yet wired to publish
+  or consume. When adding a new event, declare the queue + binding in
+  the *consumer* service, not in the producer.
 - **Authentication.** No service has auth. All endpoints are
   `AllowAny`. Adding auth is a platform-wide decision, not per-service.
 - **Cross-service composition / API gateway.** No gateway yet.
@@ -485,11 +541,35 @@ substitute the equivalent in your framework.
 
 | Question | Answer |
 |----------|--------|
-| Where does this service run? | `localhost:8000` (or whatever port) |
+| Where does this service run? | `localhost:<port>` (see port allocation below) |
 | Where's the compose? | `<service>/docker-compose.yml`, **not** the root |
 | How do I add auth? | Don't, until the platform decides on a pattern |
-| How do I add events? | Wait for the RabbitMQ milestone |
-| Why is my edit not live? | gunicorn doesn't reload — `docker compose up -d --build` |
+| How do I add events? | Declare the queue + binding in the **consumer** service; producer just emits to `ecommerce.events` |
+| Why is my edit not live? | gunicorn (Django) / `node` (Nest) don't auto-reload — `docker compose up -d --build` |
 | Why does the trailing slash matter? | Django 301-redirects; Postman hides it |
 | Why is everything 500? | Forgot `UNAUTHENTICATED_USER: None` in DRF settings |
 | Why is the port stuck on 8000? | Docker Desktop port-proxy; `docker compose down`, wait, retry |
+| What port do I use? | Allocation: `category-service` 8000, `product-service` 8001, RabbitMQ mgmt 15672. New services: pick the next free port. |
+
+### Port allocation (locked)
+
+| Port  | Service / purpose              |
+|-------|--------------------------------|
+| 8000  | `category-service` HTTP        |
+| 8001  | `product-service` HTTP         |
+| 15672 | RabbitMQ management UI         |
+| 5672  | RabbitMQ AMQP                  |
+| 5432  | PostgreSQL (per-service DB)    |
+
+When you add a new service, append the next free 800x port. Update this
+table. The host-side `ports:` mapping in each service's compose must
+match the in-container `PORT` env var; both default to the same number.
+
+### `.env` bootstrap
+
+Each service ships `.env.example` with safe **dev** defaults for every
+non-secret key. `POSTGRES_PASSWORD` defaults to a dev password so
+`docker compose up` works out of the box; override it in any
+non-local environment. Most services include a `Makefile` with an
+`env` target that auto-copies `.env.example` -> `.env` on first run,
+so the "missing POSTGRES_PASSWORD" error should never reach a user.

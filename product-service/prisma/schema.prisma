@@ -1,0 +1,40 @@
+// Prisma schema for product-service.
+//
+// Boundary notes (per AGENTS.md §3.1):
+//   - This service owns Products and pricing only.
+//   - It does NOT own categories. categoryId is a plain UUID string
+//     referencing a row that lives in category-service. We never
+//     join across services at the DB level.
+//   - It does NOT own stock counts. inventory-service owns those.
+//
+// Soft-delete convention (AGENTS.md §3.5):
+//   - isActive is the soft-delete flag.
+//   - Hard delete is a separate explicit code path (?hard=true on
+//     DELETE /api/products/:id/).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?  @db.Text
+  price       Decimal  @db.Decimal(10, 2)
+  sku         String   @unique
+  categoryId  String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([categoryId])
+  @@index([isActive])
+  @@map("products")
+}

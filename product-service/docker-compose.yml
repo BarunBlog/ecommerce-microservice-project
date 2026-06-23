@@ -1,0 +1,119 @@
+# docker-compose.yml — product-service stack
+#
+# Brings up:
+#   - product-db     : PostgreSQL 16 (named volume for data)
+#   - rabbitmq       : Message broker for platform-wide events
+#   - product-service: NestJS + Prisma, built from ./Dockerfile
+#
+# NOTE on category-service:
+#   product-service embeds category metadata in findOne() responses
+#   by calling category-service over HTTP. We attach product-service to
+#   the external `category-net` network (created by category-service's
+#   compose) so the hostname `category-service` resolves across stacks.
+#   Start category-service first if you're running this stack standalone:
+#
+#       (cd ../category-service && docker compose up -d)
+#       docker compose up --build
+#
+# Port allocation:
+#   - category-service: 8000
+#   - product-service : 8001   <- this file
+#   - rabbitmq mgmt   : 15672
+#   If you change PORT in .env, update the `ports:` mapping below to
+#   match; they have to stay in sync.
+#
+# Usage:
+#   make up                     # copies .env.example -> .env on first run
+#   docker compose up --build   # or run by hand
+#   curl http://localhost:8001/healthz
+
+services:
+  product-db:
+    image: postgres:16
+    container_name: product-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-product_db}
+      POSTGRES_USER: ${POSTGRES_USER:-product_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - product_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-product_user} -d ${POSTGRES_DB:-product_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - product-net
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    # AMQP + management UI. guest/guest works only on localhost; if you
+    # need remote admin access, create a real user via the management UI.
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - product-net
+
+  product-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: product-service
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Force the in-container host/port to the compose service. If we
+      # left .env's `POSTGRES_HOST=localhost` in place, the container
+      # would never reach product-db. PORT is also re-pinned to the
+      # default 8001 so the container, the host mapping, and the health
+      # check all agree.
+      POSTGRES_HOST: product-db
+      POSTGRES_PORT: 5432
+      # DATABASE_URL is consumed by Prisma (`url = env("DATABASE_URL")"`
+      # in schema.prisma). It must point at product-db, not the host's
+      # localhost. Rebuilt from the same POSTGRES_* overrides above so
+      # the two never drift.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-product_user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@product-db:5432/${POSTGRES_DB:-product_db}
+      PORT: ${PORT:-8001}
+      # category-service alias on the shared network.
+      CATEGORY_SERVICE_BASE_URL: http://category-service:8000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      product-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8001}:${PORT:-8001}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:'+process.env.PORT+'/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    networks:
+      - product-net
+      - category-net
+
+volumes:
+  product_db_data:
+    name: product_db_data
+
+networks:
+  product-net:
+    name: product-net
+    driver: bridge
+  category-net:
+    # Reuse the network created by category-service's compose so the
+    # hostname `category-service` resolves to that container.
+    name: category-net
+    external: true
