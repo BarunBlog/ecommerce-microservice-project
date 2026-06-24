@@ -31,16 +31,22 @@ echo "[entrypoint] PostgreSQL is up."
 
 # --- Apply Prisma migrations ----------------------------------------------
 # `migrate deploy` is the production-safe command: applies pending
-# migrations from prisma/migrations without prompting. On first boot the
-# migrations folder may be empty; fall back to `db push` so the schema is
-# created. In real use you should commit generated SQL into migrations.
-if [ -d "prisma/migrations" ] && [ -n "$(ls -A prisma/migrations 2>/dev/null)" ]; then
-  echo "[entrypoint] Applying Prisma migrations..."
-  npx prisma migrate deploy
-else
-  echo "[entrypoint] No migrations folder found; running 'prisma db push' to sync schema."
-  npx prisma db push --skip-generate
+# migrations from prisma/migrations without prompting. The migrations
+# directory is REQUIRED to be present and non-empty. There is no
+# `db push` fallback — that command mutates the live schema without
+# writing a migration file, which means the next person who clones the
+# repo would have no migration history to replay. If migrations are
+# missing, fail loudly so the operator notices and commits the SQL.
+if [ ! -d "prisma/migrations" ] || [ -z "$(ls -A prisma/migrations 2>/dev/null)" ]; then
+  echo "[entrypoint] FATAL: prisma/migrations is missing or empty."
+  echo "[entrypoint] Generate the initial migration from your host with:"
+  echo "[entrypoint]   make migrate-new NAME=init"
+  echo "[entrypoint] Then commit the generated SQL and rebuild the image."
+  exit 1
 fi
+
+echo "[entrypoint] Applying Prisma migrations..."
+npx prisma migrate deploy
 
 # --- Boot the app ---------------------------------------------------------
 # We do NOT `exec` here; the Nest process becomes PID 1 of this script,

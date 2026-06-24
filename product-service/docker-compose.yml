@@ -38,6 +38,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     volumes:
       - product_db_data:/var/lib/postgresql/data
+    # No `ports:` mapping on purpose. Host-side `make migrate-new`
+    # reaches product-db via `host.docker.internal:5432` (see .env).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-product_user} -d ${POSTGRES_DB:-product_db}"]
       interval: 5s
@@ -76,8 +78,8 @@ services:
       # would never reach product-db. PORT is also re-pinned to the
       # default 8001 so the container, the host mapping, and the health
       # check all agree.
-      POSTGRES_HOST: product-db
-      POSTGRES_PORT: 5432
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
       # DATABASE_URL is consumed by Prisma (`url = env("DATABASE_URL")"`
       # in schema.prisma). It must point at product-db, not the host's
       # localhost. Rebuilt from the same POSTGRES_* overrides above so
@@ -95,7 +97,7 @@ services:
     ports:
       - "${PORT:-8001}:${PORT:-8001}"
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:'+process.env.PORT+'/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:'+process.env.PORT+'/api/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6

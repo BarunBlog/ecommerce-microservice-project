@@ -95,7 +95,7 @@ See `.env.example`. Notable keys:
 
 | Var                          | Default                                      | Notes |
 |------------------------------|----------------------------------------------|-------|
-| `PORT`                       | `8000`                                       | Nest HTTP port |
+| `PORT`                       | `8001`                                       | Nest HTTP port |
 | `DATABASE_URL`               | `postgresql://product_user:...@product-db:5432/product_db` | Prisma DSN |
 | `CATEGORY_SERVICE_BASE_URL`  | `http://category-service:8000`               | Used for cross-service category fetch |
 | `RABBITMQ_URL`               | `amqp://guest:guest@rabbitmq:5672`           | AMQP URI |
@@ -107,12 +107,18 @@ See `.env.example`. Notable keys:
 cp .env.example .env
 # In .env:
 #   - keep POSTGRES_PASSWORD at the dev default, or set your own
-#   - POSTGRES_HOST=localhost  (already the default)
+#   - POSTGRES_HOST=localhost  (or `host.docker.internal` if Postgres
+#     is running in Docker and you're on Docker Desktop / WSL2)
 #   - PORT=8001                (already the default)
-npm install
-npx prisma migrate dev --name init   # or `prisma db push` for a quick start
+make install                # host-side npm deps
+make migrate-new NAME=init   # generates prisma/migrations/<ts>_init/
 npm run start:dev
 ```
+
+For a one-off schema sync without writing a migration, use
+`npx prisma db push` — but **never** commit a DB whose schema was
+established this way, because the next `migrate deploy` on a clean
+DB will be a no-op.
 
 ## Docker run
 
@@ -123,7 +129,7 @@ npm run start:dev
 # Then bring up product-service. `make up` copies .env.example -> .env
 # automatically on first run, then builds + starts in the background.
 make up
-curl http://localhost:8001/healthz
+curl http://localhost:8001/api/healthz
 
 # Or run by hand if you prefer:
 cp .env.example .env
@@ -135,19 +141,59 @@ then starts the Nest server. Stop the stack with
 `docker compose down`; **destroy data** with `docker compose down -v`
 (or `make nuke`).
 
+## Database migrations
+
+Migrations are Prisma-generated SQL files in `prisma/migrations/<timestamp>_<name>/`.
+The committed baseline is `prisma/migrations/20260624053648_init/`.
+
+**Applying migrations** happens automatically on container start
+(`entrypoint.sh` runs `npx prisma migrate deploy`). The container
+**hard-fails** if `prisma/migrations/` is empty or missing — there is
+no `prisma db push` fallback, because silently mutating the schema
+is how migration history gets lost.
+
+**Authoring a new migration** from the host:
+
+```bash
+# 1. Edit prisma/schema.prisma
+# 2. Generate the migration SQL (Prisma CLI on the host reads .env
+#    directly, so DATABASE_URL just works):
+make migrate-new NAME=add_inventory_count
+# 3. Review the generated file:
+ls prisma/migrations/   # -> ..._add_inventory_count/migration.sql
+cat prisma/migrations/..._add_inventory_count/migration.sql
+# 4. Commit and rebuild:
+git add prisma/migrations/
+git commit -m "feat(product-service): add inventory_count column"
+make up
+```
+
+`make migrate-new` requires the host-side npm deps (run `make install`
+once). It also needs the Docker Postgres to be reachable from the
+host; with `POSTGRES_HOST=host.docker.internal` in `.env` (the
+default), this works on Docker Desktop / WSL2.
+
+Never run `npx prisma db push` against this DB — it mutates the
+schema without writing a migration file, and the next `migrate deploy`
+on a clean DB will fail to recreate the schema.
+
 ## Make targets
 
 `make help` lists them all. Common ones:
 
-| Target       | What it does                                      |
-|--------------|---------------------------------------------------|
-| `make up`    | Copy `.env.example` -> `.env` if missing, then build + start |
-| `make down`  | Stop the stack (keeps volumes)                    |
-| `make logs`  | Tail logs for the Nest container                  |
-| `make shell` | Open a shell in the running product-service       |
-| `make psql`  | Open psql against product-db                      |
-| `make studio`| Open Prisma Studio on http://localhost:5555       |
-| `make nuke`  | **Destructive** — stop and delete the DB volume   |
+| Target                | What it does                                      |
+|-----------------------|---------------------------------------------------|
+| `make up`             | Copy `.env.example` -> `.env` if missing, then build + start |
+| `make down`           | Stop the stack (keeps volumes)                    |
+| `make logs`           | Tail logs for the Nest container                  |
+| `make shell`          | Open a shell in the running product-service       |
+| `make psql`           | Open psql against product-db                      |
+| `make migrate`        | Apply pending migrations (runs inside the container) |
+| `make migrate-status` | Show migration status (inside the container)      |
+| `make migrate-new`    | Author a new migration (host-side; requires `NAME=`) |
+| `make studio`         | Open Prisma Studio on http://localhost:5555       |
+| `make install`        | Install host-side npm deps (for `migrate-new`)    |
+| `make nuke`           | **Destructive** — stop and delete the DB volume   |
 
 ## Port allocation
 

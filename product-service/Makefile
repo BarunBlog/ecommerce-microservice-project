@@ -1,4 +1,4 @@
-.PHONY: help env up down logs build rebuild restart shell psql migrate studio nuke clean
+.PHONY: help env up down logs build rebuild restart shell psql migrate migrate-new migrate-status studio nuke clean install
 
 # Compose file lives next to this Makefile.
 COMPOSE := docker compose
@@ -35,13 +35,25 @@ shell: env ## Open a shell in the running product-service container
 psql: env ## Open psql against product-db
 	$(COMPOSE) exec product-db psql -U $${POSTGRES_USER:-product_user} -d $${POSTGRES_DB:-product_db}
 
-migrate: env ## Apply Prisma migrations (uses dev container)
+migrate: env ## Apply pending Prisma migrations (runs inside the container)
 	$(COMPOSE) run --rm $(SERVICE) npx prisma migrate deploy
+
+migrate-status: env ## Show Prisma migration status (runs inside the container)
+	$(COMPOSE) run --rm $(SERVICE) npx prisma migrate status
+
+migrate-new: env ## Author a NEW migration on the host. Usage: make migrate-new NAME=add_some_field
+	@if [ -z "$(NAME)" ]; then \
+		echo "Usage: make migrate-new NAME=your_migration_name"; \
+		echo "  Example: make migrate-new NAME=add_inventory_count"; \
+		exit 1; \
+	fi
+	@echo "==> Authoring migration '$(NAME)' against $$DATABASE_URL"
+	@echo "    Host-side: needs a Postgres reachable from the host ($${POSTGRES_HOST:-localhost}:$${POSTGRES_PORT:-5432})"
+	@echo "    Tip: if you only have the Docker Postgres up, set POSTGRES_HOST=localhost in .env first."
+	@npm run --silent prisma:migrate:dev -- --name $(NAME)
 
 studio: env ## Open Prisma Studio (http://localhost:5555)
 	$(COMPOSE) run --rm -p 5555:5555 $(SERVICE) npx prisma studio
 
-nuke: ## Stop stack and DELETE the named volume (DESTRUCTIVE)
-	$(COMPOSE) down -v
-
-clean: nuke ## Same as nuke
+install: env ## Install npm deps (host-side, needed for `make migrate-new`)
+	npm install

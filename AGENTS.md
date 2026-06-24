@@ -457,9 +457,11 @@ When you scaffold a service in TypeScript + NestJS (matching the
    `dumb-init` so `docker stop` reaps the node process cleanly.
 2. **Prisma migrations on boot.** `entrypoint.sh` waits for Postgres
    (parse `DATABASE_URL` with Node to get host/port — no extra deps),
-   then runs `npx prisma migrate deploy`. Falls back to
-   `prisma db push --skip-generate` only if `prisma/migrations/` is
-   empty, so first-boot works without committed SQL.
+   then runs `npx prisma migrate deploy`. There is **no** `db push`
+   fallback — if `prisma/migrations/` is empty the container
+   hard-fails with a `make migrate-new NAME=init` hint, because a
+   service that mutates the schema silently is how you lose
+   migration history.
 3. **`npm install` clears the "Cannot find module" lint noise.**
    Until dependencies are installed in the container, every Nest
    import will flag as unresolvable in the editor. This is expected —
@@ -496,6 +498,21 @@ When you scaffold a service in TypeScript + NestJS (matching the
     so `/api/products/<uuid>` (no slash) returns 404, not a redirect.
     All clients — including Postman collections — must use trailing
     slashes. Document this in the service's README.
+13. **Authoring a new Prisma migration from the host.**
+    Edit `prisma/schema.prisma`, then from the service directory:
+
+    ```bash
+    make migrate-new NAME=add_inventory_count
+    ```
+
+    Prisma auto-loads `.env` (so `DATABASE_URL` is read from
+    `host.docker.internal:5432` and the host-side Prisma CLI can
+    reach the same Postgres the container uses). The generated SQL
+    lands in `prisma/migrations/<timestamp>_add_inventory_count/migration.sql`.
+    **Commit the directory** — the entrypoint's `migrate deploy` will
+    apply it on the next container boot. Never `prisma db push` in
+    this repo: it bypasses the migration history and is what caused
+    the original `prisma/migrations/` to stay empty on disk.
 
 ---
 
@@ -545,6 +562,7 @@ When you scaffold a service in TypeScript + NestJS (matching the
 | Where's the compose? | `<service>/docker-compose.yml`, **not** the root |
 | How do I add auth? | Don't, until the platform decides on a pattern |
 | How do I add events? | Declare the queue + binding in the **consumer** service; producer just emits to `ecommerce.events` |
+| How do I author a new Prisma migration? | `cd <service> && make migrate-new NAME=...`. Never `prisma db push`. |
 | Why is my edit not live? | gunicorn (Django) / `node` (Nest) don't auto-reload — `docker compose up -d --build` |
 | Why does the trailing slash matter? | Django 301-redirects; Postman hides it |
 | Why is everything 500? | Forgot `UNAUTHENTICATED_USER: None` in DRF settings |
