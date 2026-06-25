@@ -1,0 +1,64 @@
+# infra/docker-compose.yml — Shared Platform Infrastructure Backbone
+#
+# This stack owns the platform-wide shared infrastructure that does NOT
+# belong to any individual service's domain. Today: RabbitMQ. Future
+# additions may include a shared Postgres, a logging sidecar, a secrets
+# manager, etc.
+#
+# Why a separate compose file:
+#   - Decouples infrastructure lifecycle from service lifecycle.
+#     Services can be rebuilt and torn down without touching the broker.
+#   - One shared bridge network (`shared-platform-net`) so any service
+#     in the monorepo can reach `rabbitmq` (and future shared infra)
+#     by hostname, regardless of which service-level compose brought
+#     the service up.
+#   - Follows AGENTS.md §7 (every service ships its own compose) by
+#     extending the rule: shared infra ships its own compose at the
+#     repo root, and consuming services mark the network as `external`.
+#
+# Boot sequence:
+#   1. Bring this stack up first (silently, in the background):
+#        docker compose -f infra/docker-compose.yml up -d
+#   2. Then bring up individual services (e.g. category-service,
+#      product-service). Each service-level compose declares
+#      `shared-platform-net` as `external: true` and attaches to it.
+#
+# Port allocation:
+#   - 5672  : RabbitMQ AMQP
+#   - 15672 : RabbitMQ Management Web UI (http://localhost:15672, guest/guest)
+#
+# Network:
+#   - shared-platform-net : bridge network. Created here, owned here.
+#     Every service-level compose that needs RabbitMQ (or future
+#     shared infra) marks this network as `external: true`.
+#
+# Usage:
+#   make -C infra up            # start shared infra in the background
+#   make -C infra down          # stop shared infra (keeps volumes)
+#   make -C infra logs          # tail logs for the broker
+#   make -C infra status        # show running containers + networks
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    # AMQP + management UI. guest/guest is the dev default and only
+    # works on localhost. Create a real user via the management UI
+    # (http://localhost:15672) before exposing this to anything else.
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management Web UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - shared-platform-net
+
+networks:
+  shared-platform-net:
+    name: shared-platform-net
+    driver: bridge

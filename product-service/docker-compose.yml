@@ -2,23 +2,29 @@
 #
 # Brings up:
 #   - product-db     : PostgreSQL 16 (named volume for data)
-#   - rabbitmq       : Message broker for platform-wide events
 #   - product-service: NestJS + Prisma, built from ./Dockerfile
 #
-# NOTE on category-service:
-#   product-service embeds category metadata in findOne() responses
-#   by calling category-service over HTTP. We attach product-service to
-#   the external `category-net` network (created by category-service's
-#   compose) so the hostname `category-service` resolves across stacks.
-#   Start category-service first if you're running this stack standalone:
+# RabbitMQ used to live in this file; it has been moved to the
+# root-level `infra/docker-compose.yml` so the broker is part of the
+# shared platform backbone rather than a service-domain concern.
+# Bring shared infra up before this stack:
 #
-#       (cd ../category-service && docker compose up -d)
+#       (cd ../infra && docker compose up -d)
 #       docker compose up --build
+#
+# The Nest container is attached to TWO networks:
+#   1. `product-net`         — internal, for talking to its own
+#                              `product-db` (also: `category-net` for
+#                              the cross-service category embed).
+#   2. `shared-platform-net` — external global infrastructure backbone,
+#                              created by `infra/docker-compose.yml`,
+#                              used here to resolve the `rabbitmq`
+#                              hostname referenced in RABBITMQ_URL.
 #
 # Port allocation:
 #   - category-service: 8000
 #   - product-service : 8001   <- this file
-#   - rabbitmq mgmt   : 15672
+#   - rabbitmq mgmt   : 15672  (owned by infra/docker-compose.yml)
 #   If you change PORT in .env, update the `ports:` mapping below to
 #   match; they have to stay in sync.
 #
@@ -48,23 +54,6 @@ services:
     networks:
       - product-net
 
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: rabbitmq
-    restart: unless-stopped
-    # AMQP + management UI. guest/guest works only on localhost; if you
-    # need remote admin access, create a real user via the management UI.
-    ports:
-      - "5672:5672"   # AMQP
-      - "15672:15672" # Management UI
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - product-net
-
   product-service:
     build:
       context: .
@@ -88,11 +77,11 @@ services:
       PORT: ${PORT:-8001}
       # category-service alias on the shared network.
       CATEGORY_SERVICE_BASE_URL: http://category-service:8000
+      # Resolved over the `shared-platform-net` external network. The
+      # hostname `rabbitmq` is owned by infra/docker-compose.yml.
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:
       product-db:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
     ports:
       - "${PORT:-8001}:${PORT:-8001}"
@@ -105,6 +94,7 @@ services:
     networks:
       - product-net
       - category-net
+      - shared-platform-net
 
 volumes:
   product_db_data:
@@ -118,4 +108,11 @@ networks:
     # Reuse the network created by category-service's compose so the
     # hostname `category-service` resolves to that container.
     name: category-net
+    external: true
+  shared-platform-net:
+    # Owned by infra/docker-compose.yml at the repo root. This service
+    # only attaches to it so the Nest app can reach `rabbitmq` by
+    # hostname. Do NOT run `docker compose up` here expecting this
+    # network to be created — bring shared infra up first.
+    name: shared-platform-net
     external: true
