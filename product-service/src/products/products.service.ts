@@ -23,7 +23,17 @@ import {
 } from './entities/product.entity';
 
 const PRODUCTS_EXCHANGE = 'ecommerce.events';
-const ROUTING_KEY_PRODUCT_CREATED = 'products.event.created';
+
+export type ProductEvent = 'created' | 'updated' | 'deleted';
+
+/**
+ * Payload shape for `products.event.deleted`. It is the serialized
+ * product snapshot (the row as it stood at delete time) plus a
+ * `hard` discriminator so consumers can distinguish soft from hard
+ * deletes without re-deriving it. For `created`/`updated` we use the
+ * plain `SerializedProduct` (no extra flag).
+ */
+export type ProductEventPayload = SerializedProduct | (SerializedProduct & { hard: boolean });
 
 interface ListOptions {
   includeInactive: boolean;
@@ -39,9 +49,9 @@ interface ListOptions {
  *   3. Soft-delete handling. Hard delete is explicit and rare.
  *   4. Cross-service sync read: on findOne(), fetch the related
  *      category from category-service over HTTP and embed it.
- *   5. Async event emission: on create(), publish a
- *      `products.event.created` message to the platform's RabbitMQ
- *      topic exchange.
+ *   5. Async event emission: on create/update/delete (soft & hard),
+ *      publish a `products.event.<event>` message to the platform's
+ *      RabbitMQ topic exchange via a single generic emit() helper.
  */
 @Injectable()
 export class ProductsService implements OnModuleInit {
@@ -106,7 +116,7 @@ export class ProductsService implements OnModuleInit {
     // we log a warning on failure but do not roll back the row. The
     // events bus is fire-and-forget; consumers are expected to be
     // idempotent and the broker is durable.
-    this.emitProductCreated(product).catch((err) => {
+    this.emitProductEvent('created', product).catch((err) => {
       this.logger.warn(
         `Failed to publish products.event.created for ${product.id}: ${err}`,
       );
@@ -172,6 +182,15 @@ export class ProductsService implements OnModuleInit {
     } catch (err) {
       throw this.translatePrismaError(err);
     }
+
+    // Best-effort event publish — same contract as create(): warn on
+    // failure, never roll back the write.
+    this.emitProductEvent('updated', updated).catch((err) => {
+      this.logger.warn(
+        `Failed to publish products.event.updated for ${updated.id}: ${err}`,
+      );
+    });
+
     return updated;
   }
 
@@ -197,6 +216,18 @@ export class ProductsService implements OnModuleInit {
       where: { id },
       data: { isActive: false },
     });
+
+    // Best-effort event publish. We send the serialized row as it
+    // stands post-mutation (isActive=false) plus a `hard: false`
+    // discriminator so consumers can tell soft vs hard deletes apart.
+    this.emitProductEvent('deleted', { ...serializeProduct(updated), hard: false }).catch(
+      (err) => {
+        this.logger.warn(
+          `Failed to publish products.event.deleted (soft) for ${updated.id}: ${err}`,
+        );
+      },
+    );
+
     return {
       detail: 'Product soft-deleted (isActive=false).',
       id: updated.id,
@@ -208,12 +239,26 @@ export class ProductsService implements OnModuleInit {
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
     }
+    // Snapshot before delete — the row will be gone after this call.
+    const snapshot = serializeProduct(existing);
     await this.prisma.product.delete({ where: { id } });
+
+    // Best-effort event publish. The row no longer exists locally,
+    // so we attach the last known snapshot plus `hard: true` so
+    // consumers can route/delete/replay accordingly.
+    this.emitProductEvent('deleted', { ...snapshot, hard: true }).catch((err) => {
+      this.logger.warn(
+        `Failed to publish products.event.deleted (hard) for ${snapshot.id}: ${err}`,
+      );
+    });
   }
 
   // ---------------------------------------------------------- internals
   private buildSlug(name: string): string {
-    return slugify(name, { lower: true, strict: true, trim: true }).slice(0, 120);
+    return slugify(name, { lower: true, strict: true, trim: true }).slice(
+      0,
+      120,
+    );
   }
 
   /**
@@ -236,16 +281,31 @@ export class ProductsService implements OnModuleInit {
     }
   }
 
-  private async emitProductCreated(product: SerializedProduct): Promise<void> {
+  /**
+   * Generic event publisher. All product lifecycle events flow through
+   * here so we never end up with a parallel `emitProductCreated` /
+   * `emitProductUpdated` / `emitProductDeleted` per-action method.
+   *
+   * Routing key is derived as `products.event.<event>`. The payload
+   * shape is:
+   *   { event, occurredAt, data: <payload> }
+   * where `data` is whatever the caller passed (the serialized product
+   * for created/updated, the snapshot+`hard` flag for deleted).
+   */
+  private async emitProductEvent(
+    event: ProductEvent,
+    payload: ProductEventPayload,
+  ): Promise<void> {
+    const routingKey = `products.event.${event}`;
     await firstValueFrom(
-      this.eventsBus.emit(ROUTING_KEY_PRODUCT_CREATED, {
-        event: ROUTING_KEY_PRODUCT_CREATED,
+      this.eventsBus.emit(routingKey, {
+        event: routingKey,
         occurredAt: new Date().toISOString(),
-        data: product,
+        data: payload,
       }),
     );
     this.logger.log(
-      `Published ${ROUTING_KEY_PRODUCT_CREATED} for product ${product.id} to ${PRODUCTS_EXCHANGE}`,
+      `Published ${routingKey} for product ${payload.id} to ${PRODUCTS_EXCHANGE}`,
     );
   }
 
