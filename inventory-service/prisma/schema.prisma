@@ -1,0 +1,44 @@
+// Prisma schema for inventory-service.
+//
+// Boundary notes (per AGENTS.md §3.1):
+//   - This service owns stock quantities for products. It does NOT
+//     own product records (those live in product-service) and does
+//     NOT own category records (those live in category-service).
+//   - productId is a plain UUID string referencing a row that lives
+//     in product-service's database. We never join across services
+//     at the DB level and we do NOT declare a Prisma `@relation` to
+//     a foreign model that doesn't exist in this schema. It is a
+//     logical scalar pointer.
+//   - productId is @unique because we expect at most one inventory
+//     row per product. Stock-level uniqueness is enforced at the
+//     application layer when reservations are introduced.
+//
+// Event-driven provisioning:
+//   - product-service publishes `products.event.created` to the
+//     `ecommerce.events` topic exchange on RabbitMQ.
+//   - The InventoryController in this service consumes that routing
+//     key and upserts an Inventory row with stockCount=0 so the
+//     product has a place to accumulate stock the moment it exists.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Inventory {
+  id            String   @id @default(uuid())
+  productId     String   @unique
+  stockCount    Int      @default(0)
+  reservedCount Int      @default(0)
+  location      String?  @default("Main Warehouse")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([productId])
+  @@map("inventories")
+}

@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { HttpModule } from '@nestjs/axios';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { EventsModule } from './events/events.module';
 import { ProductsModule } from './products/products.module';
 
 @Module({
@@ -21,12 +22,10 @@ import { ProductsModule } from './products/products.module';
       maxRedirects: 0,
     }),
 
-    // Note: the RabbitMQ `EVENTS_BUS` ClientProxy is registered inside
-    // ProductsModule (not here) so the provider lives in the same
-    // module context as the consumer that injects it. Dynamic-module
-    // providers from `ClientsModule.register` are scoped to the
-    // importing module — they do not propagate to other modules
-    // through `imports`.
+    // EventsModule is registered globally so any future module that
+    // needs to publish product / order / payment events can inject
+    // `RabbitMqPublisher` without re-declaring the connection.
+    EventsModule,
 
     PrismaModule,
     HealthModule,

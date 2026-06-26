@@ -1,19 +1,16 @@
 import {
-  Inject,
   Injectable,
   Logger,
-  NotFoundException,
-  OnModuleInit,
   BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
-import { firstValueFrom } from 'rxjs';
 import slugify from 'slugify';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { RabbitMqPublisher } from '../events/rabbitmq.publisher';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import {
@@ -21,8 +18,6 @@ import {
   SerializedProduct,
   serializeProduct,
 } from './entities/product.entity';
-
-const PRODUCTS_EXCHANGE = 'ecommerce.events';
 
 export type ProductEvent = 'created' | 'updated' | 'deleted';
 
@@ -54,7 +49,7 @@ interface ListOptions {
  *      RabbitMQ topic exchange via a single generic emit() helper.
  */
 @Injectable()
-export class ProductsService implements OnModuleInit {
+export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
   private readonly categoryBaseUrl: string;
 
@@ -62,30 +57,12 @@ export class ProductsService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly http: HttpService,
     private readonly config: ConfigService,
-    @Inject('EVENTS_BUS') private readonly eventsBus: ClientProxy,
+    private readonly eventsBus: RabbitMqPublisher,
   ) {
     this.categoryBaseUrl = (
       this.config.get<string>('CATEGORY_SERVICE_BASE_URL') ??
       'http://category-service:8000'
     ).replace(/\/+$/, '');
-  }
-
-  /**
-   * Make sure the platform's topic exchange exists before we ever try
-   * to publish to it. emit() is otherwise lazy and would silently
-   * buffer in a disconnected ClientProxy.
-   */
-  async onModuleInit(): Promise<void> {
-    try {
-      await this.eventsBus.connect();
-      this.logger.log('EVENTS_BUS connected to RabbitMQ');
-    } catch (err) {
-      this.logger.error(
-        `EVENTS_BUS failed to connect to RabbitMQ: ${(err as Error).message}`,
-      );
-      // Re-throw so the container restart loop catches it loudly.
-      throw err;
-    }
   }
 
   // ---------------------------------------------------------------- create
@@ -269,9 +246,9 @@ export class ProductsService implements OnModuleInit {
   private async fetchCategory(categoryId: string): Promise<CategoryEmbed | null> {
     const url = `${this.categoryBaseUrl}/api/categories/${categoryId}/`;
     try {
-      const res = await firstValueFrom(
-        this.http.get<CategoryEmbed>(url, { timeout: 3_000 }),
-      );
+      const res = await this.http.axiosRef.get<CategoryEmbed>(url, {
+        timeout: 3_000,
+      });
       return res.data ?? null;
     } catch (err) {
       this.logger.warn(
@@ -297,16 +274,12 @@ export class ProductsService implements OnModuleInit {
     payload: ProductEventPayload,
   ): Promise<void> {
     const routingKey = `products.event.${event}`;
-    await firstValueFrom(
-      this.eventsBus.emit(routingKey, {
-        event: routingKey,
-        occurredAt: new Date().toISOString(),
-        data: payload,
-      }),
-    );
-    this.logger.log(
-      `Published ${routingKey} for product ${payload.id} to ${PRODUCTS_EXCHANGE}`,
-    );
+    await this.eventsBus.publish(routingKey, {
+      event: routingKey,
+      occurredAt: new Date().toISOString(),
+      data: payload,
+    });
+    this.logger.log(`Published ${routingKey} for product ${payload.id}`);
   }
 
   /**

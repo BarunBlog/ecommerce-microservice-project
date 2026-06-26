@@ -58,6 +58,35 @@ services:
     networks:
       - shared-platform-net
 
+  # One-shot broker topology bootstrap. Runs rabbitmq-setup.sh after
+  # rabbitmq is healthy, declares the shared topic exchange, and binds
+  # the inventory-service queue. Idempotent (declare operations are
+  # no-ops when the entity already exists with the same properties).
+  # Why a service instead of a make target: this lets `docker compose
+  # -f infra/docker-compose.yml up -d` bring the broker to a fully
+  # usable state in one command, without a separate manual step.
+  # Uses the official RabbitMQ CLI image so rabbitmqadmin is on PATH
+  # without needing `docker exec` (cleaner, easier to read in CI logs).
+  rabbitmq-setup:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-setup
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    # The setup script lives in the infra/ directory alongside this
+    # compose file. We mount it read-only and exec it inside a
+    # throwaway container that shares the broker's network so the
+    # `rabbitmq` hostname resolves.
+    volumes:
+      - ./rabbitmq-setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    networks:
+      - shared-platform-net
+    # This container's job is to run once and exit. We don't need
+    # `restart: unless-stopped` — Compose will recreate it next time
+    # `up` is called.
+    restart: "no"
+
 networks:
   shared-platform-net:
     name: shared-platform-net

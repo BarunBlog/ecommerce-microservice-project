@@ -1,0 +1,26 @@
+# Compiled output
+/dist
+/node_modules
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+.puku/
+
+# Env files
+.env
+.env.local
+
+# Build cache
+.tsbuildinfo
+# TypeScript incremental build cache
+*.tsbuildinfo

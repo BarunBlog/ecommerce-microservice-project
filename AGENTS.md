@@ -16,10 +16,10 @@ microservices that together power a small ecommerce platform.
 | Service              | Status         | Purpose                                |
 |----------------------|----------------|----------------------------------------|
 | `category-service`   | **Implemented**| CRUD for the `Category` catalog.       |
-| `product-service`    | **Implemented (NestJS)** | CRUD for the `Product` catalog + prices. Embeds category from `category-service` over HTTP. Publishes `products.event.created` to the `ecommerce.events` topic exchange. |
+| `product-service`    | **Implemented (NestJS)** | CRUD for the `Product` catalog + prices. Embeds category from `category-service` over HTTP. Publishes `products.event.{created,updated,deleted}` to the `ecommerce.events` topic exchange via `RabbitMqPublisher` (direct `amqp-connection-manager`, see §7.1). |
+| `inventory-service`  | **Implemented (NestJS)** | Owns product stock counts. Consumer of `products.event.{created,updated,deleted}` on the `ecommerce.events` topic exchange (queue `inventory-service.products.created`, routing-key wildcard `products.event.*`); auto-provisions an `Inventory` row with `stockCount=0` on created, observes updates, and hard-deletes the row on hard-deleted. Exposes signed stock-adjustment and stock-lookup REST endpoints. |
 | `cart-service`       | Placeholder dir| (not started)                          |
 | `order-service`      | Placeholder dir| (not started)                          |
-| `inventory-service`  | Placeholder dir| (not started)                          |
 | `payment-service`    | Placeholder dir| (not started)                          |
 | `notification-service` | Placeholder dir | (not started)                       |
 | `user-service`       | Placeholder dir| (not started)                          |
@@ -71,7 +71,7 @@ ecommerce-microservice-project/
 │   ├── .env                  # gitignored
 │   ├── myvenv/               # gitignored
 │   └── README.md
-├── inventory-service/        # empty placeholder
+├── inventory-service/        # NestJS + Prisma, consumes products.event.created
 ├── notification-service/     # empty placeholder
 ├── order-service/            # empty placeholder
 ├── payment-service/          # empty placeholder
@@ -485,12 +485,30 @@ When you scaffold a service in TypeScript + NestJS (matching the
    `AppModule`. 3-second timeout. On any error (timeout, non-2xx,
    network), embed `category: null` and log a warning — never throw
    out of `findOne()`.
-10. **RabbitMQ producer.** Use `ClientsModule.register` with
-    `transport: Transport.RMQ`, `exchange: 'ecommerce.events'`,
-    `exchangeType: 'topic'`, `exchangeOptions: { durable: true }`,
-    `persistent: true`. Connect lazily in `onModuleInit()` so missing
-    brokers don't crash boot. Failed emits log a warning but never
-    roll back the API write.
+10. **RabbitMQ producer — DO NOT USE `ClientsModule.register` for
+    events.** This is the single most expensive lesson from the
+    product-service ↔ inventory-service wiring. In
+    `@nestjs/microservices@10`, the `ClientRMQ.dispatchEvent` method
+    calls `channel.sendToQueue(this.queue, ...)`, NOT
+    `channel.publish(this.exchange, routingKey, ...)`. The `exchange`
+    option on the `options` block is silently ignored on the publish
+    path: the message is sent to the AMQP default exchange with
+    `this.queue` as the routing key, which routes to a queue with
+    that exact name (or nowhere, if no such queue exists). The queue
+    defaults to the literal string `'default'` (`RQM_DEFAULT_QUEUE`),
+    so every published event ends up in a queue literally named
+    `default` instead of the topic exchange you declared in `options`.
+    Symptom: producer logs say "Published to ecommerce.events" but
+    `rabbitmqctl list_queues` shows the message in queue `default`
+    with `routing_key='default'`, `exchange=''`. The topic exchange
+    is never asserted and consumer bindings never fire.
+    Instead, use a thin wrapper around `amqp-connection-manager` (see
+    `product-service/src/events/rabbitmq.publisher.ts`). It connects
+    once, asserts the topic exchange on setup, and publishes via
+    `channel.publish(exchange, routingKey, body, { persistent: true })`.
+    The same wrapper also embeds the `pattern` field in the body so
+    Nest's `ServerRMQ` can dispatch to `@EventPattern` handlers (see
+    §7.1.0 below).
 11. **Docker networking.** The service's `docker-compose.yml` joins an
     external network named `<upstream>-net` (e.g. `category-net`) so
     the hostname `category-service` resolves across stacks.
@@ -514,17 +532,108 @@ When you scaffold a service in TypeScript + NestJS (matching the
     this repo: it bypasses the migration history and is what caused
     the original `prisma/migrations/` to stay empty on disk.
 
+### 7.1.0 Event envelope convention (RabbitMQ topic exchange)
+
+Every `*.event.*` message published to the `ecommerce.events` topic
+exchange uses a two-layer envelope so producers can stay stack-agnostic
+while NestJS consumers can dispatch cleanly:
+
+```
+{
+  pattern:  "products.event.created",   // top-level, for Nest dispatch
+  data: {                              // top-level, payload delivered to handler
+    event:      "products.event.created",
+    occurredAt: "2026-06-26T08:31:40.037Z",
+    data: {                            // actual product snapshot
+      id, name, slug, price, sku, categoryId, isActive, createdAt, updatedAt
+    }
+  }
+}
+```
+
+Why the duplicated nesting:
+
+- **Top-level `pattern`.** `ServerRMQ` in `@nestjs/microservices@10`
+  reads `packet.pattern` from the JSON body to decide which
+  `@EventPattern(...)` handler to call. It does **not** use the AMQP
+  routing key for dispatch. The producer embeds the routing key into
+  the body so the consumer code is identical regardless of which
+  AMQP-level transport was used.
+- **Top-level `data`.** `ServerRMQ.readPacket` extracts `packet.data`
+  and passes that as the `@Payload()` argument. Wrapping our envelope
+  in `{ pattern, data: <envelope> }` lets the consumer code keep
+  reading `payload.data.id` exactly as it did before, with no change
+  to the inventory handlers or DTOs.
+- **Inner `data` (snapshot).** The platform's domain envelope —
+  `{ event, occurredAt, data: <snapshot> }` — stays intact for any
+  non-Nest consumer (Python, Go, anything that just reads JSON).
+
+If you write a new producer, wrap your envelope as
+`{ pattern: routingKey, data: <envelope> }` and call
+`channel.publish(exchange, routingKey, body, { persistent: true })`
+— never `sendToQueue`.
+
+### 7.1.1 Consumer-only NestJS service notes (e.g. `inventory-service`)
+
+`inventory-service` shares the §7.1 base checklist, but it is a
+**consumer** of `products.event.created`, not a producer. Use this
+checklist on top of §7.1:
+
+1. **Hybrid app.** Use a single Nest instance that runs BOTH an HTTP
+   server AND a RabbitMQ consumer. In `main.ts`, call
+   `app.connectMicroservice(rmqOptions)` *before*
+   `app.startAllMicroservices()` and `app.listen(port)`. Mounting
+   controllers and handlers in one process keeps dev / prod parity
+   and matches how `product-service` already runs.
+2. **RMQ config is duplicated in two places.** The
+   `InventoryModule` registers a `ClientsModule.register` *client* (for
+   future emit-back needs), and `main.ts` configures the
+   `connectMicroservice` *server* with the same exchange / queue /
+   routing-key. Both are read from `process.env` at boot. **If you
+   change one, change both** — comment in `main.ts` enforces this.
+3. **Event handler uses `@EventPattern` with manual ack.** Declare
+   `noAck: false` on the consumer config. Inside the handler, on
+   success call `channel.ack(originalMsg)`; on a non-recoverable
+   error (e.g. invalid payload, unsupported version), call
+   `channel.nack(originalMsg, false, false)` — no requeue — and log
+   loudly. We never requeue a poison message; that would block the
+   queue forever.
+4. **Idempotent provisioning.** The consumer's job is to upsert an
+   `Inventory` row keyed by `productId`. Use Prisma's
+   `inventory.upsert(...)` with `update: {}` so existing stock counts
+   are preserved across redelivery. The unique index on `productId`
+   (defined in `schema.prisma`) guarantees only one row per product
+   even if a duplicate event lands in parallel.
+5. **Strict payload validation.** Read only what the handler needs
+   (`data.id`). Validate it's a UUID v4 with a regex before touching
+   the DB. Invalid payloads are acknowledged (no requeue) and logged.
+6. **Two-network compose layout.** The service's `docker-compose.yml`
+   joins `inventory-net` (internal, for talking to its own
+   `inventory-db`) AND `shared-platform-net` (external, for
+   `rabbitmq`). The broker's hostname (`rabbitmq`) only resolves on
+   the shared network.
+7. **Entry-point waits for RabbitMQ too.** In addition to the Postgres
+   wait from §7.1.2, the entrypoint must wait for AMQP on `rabbitmq:5672`
+   (use `nc -z rabbitmq 5672`) before `migrate deploy`, so the
+   consumer-side can fail fast at boot rather than at first message.
+8. **No producer / no fanout.** The service is read-only with respect
+   to other services' events. Do not add a `ClientProxy.emit(...)` to
+   the success path; if a downstream effect is needed, it goes through
+   its own dedicated event after the DB write is durable.
+
 ---
 
 ## 8. Out of scope (for now)
 
 - **RabbitMQ events.** `product-service` already publishes
   `products.event.created` to the `ecommerce.events` topic exchange.
-  `category-service` does **not** publish yet — `categories/signals.py`
-  wiring is still a future task. Other services (cart, order,
-  inventory, payment, notification, user) are not yet wired to publish
-  or consume. When adding a new event, declare the queue + binding in
-  the *consumer* service, not in the producer.
+  `inventory-service` already consumes it (auto-provisions an
+  `Inventory` row with `stockCount=0`). `category-service` does **not**
+  publish yet — `categories/signals.py` wiring is still a future
+  task. Other services (cart, order, payment, notification, user) are
+  not yet wired to publish or consume. When adding a new event,
+  declare the queue + binding in the *consumer* service, not in the
+  producer.
 - **Authentication.** No service has auth. All endpoints are
   `AllowAny`. Adding auth is a platform-wide decision, not per-service.
 - **Cross-service composition / API gateway.** No gateway yet.
@@ -532,8 +641,8 @@ When you scaffold a service in TypeScript + NestJS (matching the
 - **CI/CD.** No pipelines configured. Local + Docker is the workflow.
 - **Production deployment.** This repo is for local dev. Deployment
   to AWS/GCP/etc. is a separate concern.
-- **Other six services** (`cart`, `inventory`, `notification`,
-  `order`, `payment`, `product`, `user`) — empty placeholders. Build
+- **Other five services** (`cart`, `notification`,
+  `order`, `payment`, `user`) — empty placeholders. Build
   them following §7.
 
 ---
@@ -567,7 +676,7 @@ When you scaffold a service in TypeScript + NestJS (matching the
 | Why does the trailing slash matter? | Django 301-redirects; Postman hides it |
 | Why is everything 500? | Forgot `UNAUTHENTICATED_USER: None` in DRF settings |
 | Why is the port stuck on 8000? | Docker Desktop port-proxy; `docker compose down`, wait, retry |
-| What port do I use? | Allocation: `category-service` 8000, `product-service` 8001, RabbitMQ mgmt 15672. New services: pick the next free port. |
+| What port do I use? | Allocation: `category-service` 8000, `product-service` 8001, `inventory-service` 8002, RabbitMQ mgmt 15672. New services: pick the next free port. |
 
 ### Port allocation (locked)
 
@@ -575,6 +684,7 @@ When you scaffold a service in TypeScript + NestJS (matching the
 |-------|--------------------------------|
 | 8000  | `category-service` HTTP        |
 | 8001  | `product-service` HTTP         |
+| 8002  | `inventory-service` HTTP       |
 | 15672 | RabbitMQ management UI         |
 | 5672  | RabbitMQ AMQP                  |
 | 5432  | PostgreSQL (per-service DB)    |

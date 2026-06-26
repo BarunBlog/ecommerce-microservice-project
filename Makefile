@@ -22,6 +22,7 @@
 .PHONY: help infra-up infra-down infra-logs infra-status \
         category-up category-down category-logs category-status \
         product-up product-down product-logs product-status \
+        inventory-up inventory-down inventory-logs inventory-status \
         up down status ps
 
 # --- Tier 1: shared infrastructure ---------------------------------------
@@ -47,6 +48,7 @@ infra-status: ## Show running containers + networks for the infra stack
 
 CATEGORY_DIR    := category-service
 PRODUCT_DIR     := product-service
+INVENTORY_DIR   := inventory-service
 
 category-up: infra-up ## Start category-service (depends on infra being up)
 	cd $(CATEGORY_DIR) && docker compose up -d --build
@@ -72,16 +74,30 @@ product-logs: ## Tail logs for product-service
 product-status: ## Show product-service containers
 	cd $(PRODUCT_DIR) && docker compose ps
 
+inventory-up: infra-up ## Start inventory-service (depends on infra being up)
+	cd $(INVENTORY_DIR) && docker compose up -d --build
+
+inventory-down: ## Stop inventory-service
+	cd $(INVENTORY_DIR) && docker compose down
+
+inventory-logs: ## Tail logs for inventory-service
+	cd $(INVENTORY_DIR) && docker compose logs -f
+
+inventory-status: ## Show inventory-service containers
+	cd $(INVENTORY_DIR) && docker compose ps
+
 # --- Cross-cutting helpers ------------------------------------------------
 
-up: infra-up category-up product-up ## Start infra + all known services
+up: infra-up category-up product-up inventory-up ## Start infra + all known services
 	@echo ""
 	@echo "Stack is up:"
-	@echo "  - category-service: http://localhost:8000/api/healthz"
-	@echo "  - product-service : http://localhost:8001/api/healthz"
+	@echo "  - category-service : http://localhost:8000/api/healthz"
+	@echo "  - product-service  : http://localhost:8001/api/healthz"
+	@echo "  - inventory-service: http://localhost:8002/api/healthz"
 	@echo "  - rabbitmq mgmt ui : http://localhost:15672  (guest/guest)"
 
 down: ## Stop all services and shared infra (keeps volumes)
+	cd $(INVENTORY_DIR) && docker compose down
 	cd $(PRODUCT_DIR)  && docker compose down
 	cd $(CATEGORY_DIR) && docker compose down
 	$(INFRA_COMPOSE) down
@@ -95,6 +111,9 @@ status: ## Show what's running across every tier
 	@echo ""
 	@echo "=== product-service ==="
 	(cd $(PRODUCT_DIR) && docker compose ps) || true
+	@echo ""
+	@echo "=== inventory-service ==="
+	(cd $(INVENTORY_DIR) && docker compose ps) || true
 
 ps: status ## Alias for `make status`
 
