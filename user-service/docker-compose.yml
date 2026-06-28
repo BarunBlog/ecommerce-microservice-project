@@ -1,0 +1,81 @@
+# docker-compose.yml — user-service local stack
+#
+# Brings up:
+#   - user-db         : PostgreSQL 16 (named volume for data)
+#   - user-service    : Django + DRF (dev: runserver), built from ./Dockerfile
+#
+# Networks:
+#   - user-net          : internal, service <-> its own DB
+#   - shared-platform-net : EXTERNAL, pre-created by infra/docker-compose.yml
+#                           so this service can later reach the shared
+#                           RabbitMQ broker via hostname "rabbitmq".
+#
+# Usage:
+#   cp .env.example .env        # then edit POSTGRES_PASSWORD
+#   docker compose up -d --build
+#   curl http://localhost:8003/healthz
+#
+# Note on port: AGENTS.md §10 reserves 8000/8001/8002 for category/product/
+# inventory; user-service takes the next free slot, 8003.
+
+services:
+  user-db:
+    image: postgres:16
+    container_name: user-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-user_db}
+      POSTGRES_USER: ${POSTGRES_USER:-user_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - user_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user_user} -d ${POSTGRES_DB:-user_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - user-net
+
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: user-service
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override .env POSTGRES_HOST so the container reaches the compose
+      # service by its service name (user-db) instead of "localhost".
+      POSTGRES_HOST: user-db
+      POSTGRES_PORT: 5432
+    depends_on:
+      user-db:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8003/healthz', timeout=2).status == 200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    networks:
+      - user-net
+      - shared-platform-net
+
+volumes:
+  user_db_data:
+    name: user_db_data
+
+networks:
+  # Internal: service <-> its own DB only.
+  user-net:
+    name: user-net
+    driver: bridge
+  # EXTERNAL: pre-created by infra/docker-compose.yml (RabbitMQ lives here).
+  # Declared without `driver:` so compose looks up the existing network
+  # instead of trying to create a duplicate.
+  shared-platform-net:
+    external: true
+    name: shared-platform-net
